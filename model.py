@@ -1,13 +1,16 @@
 import torch
-from typing import Type
 from torch import nn
+from typing import Type
 from dataset import TextDataset
 
 
 class LanguageModel(nn.Module):
     def __init__(self, dataset: TextDataset, embed_size: int = 256, hidden_size: int = 256,
                  rnn_type: Type = nn.RNN, rnn_layers: int = 1):
-        super(LanguageModel, self).__init__()
+        """
+        Языковая модель на основе RNN/LSTM.
+        """
+        super().__init__()
         self.dataset = dataset
         self.vocab_size = dataset.vocab_size
         self.max_length = dataset.max_length
@@ -17,76 +20,84 @@ class LanguageModel(nn.Module):
             embedding_dim=embed_size,
             padding_idx=dataset.pad_id
         )
+
         self.rnn = rnn_type(
             input_size=embed_size,
             hidden_size=hidden_size,
             num_layers=rnn_layers,
             batch_first=True
         )
-        self.linear = nn.Linear(in_features=hidden_size, out_features=self.vocab_size)
+
+        self.linear = nn.Linear(hidden_size, self.vocab_size)
 
     def forward(self, indices: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass with packed sequences.
-        Returns logits of shape (batch_size, max_length_in_batch, vocab_size).
+        Прямой проход модели.
+        Возвращает логиты следующих токенов для каждой позиции.
         """
-        embedded = self.embedding(indices) # (B, T, E)
-        packed_embedded = nn.utils.rnn.pack_padded_sequence(
-            embedded, lengths.cpu(), batch_first=True, enforce_sorted=False
-        )
-        packed_output, _ = self.rnn(packed_embedded)
-        output, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)  # (B, L, H)
-        logits = self.linear(output) # (B, L, V)
-        return logits
+        # обрезаем последовательности по их максимальной длине в батче
+        max_len_in_batch = int(lengths.max().item())
+        indices = indices[:, :max_len_in_batch]  # (B, L)
+
+        embedded = self.embedding(indices)       # (B, L, E)
+        output, _ = self.rnn(embedded)           # (B, L, H)
+        logits = self.linear(output)             # (B, L, V)
+
+        return logits  # форма: (B, L, vocab_size)
 
     @torch.inference_mode()
-    def inference(self, prefix: str = '', temp: float = 1.) -> str:
+    def inference(self, prefix: str = '', temp: float = 1.0) -> str:
+        """
+        Генерация нового текста по префиксу.
+        """
         self.eval()
         device = next(self.parameters()).device
 
+        # перекодируем префикс → индексы без спецсимволов
         prefix_ids = self.dataset.text2ids(prefix) if prefix else []
         generated = [self.dataset.bos_id] + prefix_ids
-
         if len(generated) >= self.max_length:
             generated = generated[:self.max_length]
-            if generated and generated[0] == self.dataset.bos_id:
-                generated = generated[1:]
-            if self.dataset.eos_id in generated:
-                generated = generated[:generated.index(self.dataset.eos_id)]
-            return self.dataset.ids2text(generated)
 
+        # инициализация скрытого состояния
         batch_size = 1
         if isinstance(self.rnn, nn.LSTM):
-            h0 = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
-            c0 = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
-            hidden = (h0, c0)
+            h = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
+            c = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
+            hidden = (h, c)
         else:
             hidden = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
 
+        # прогоняем уже известные токены
         input_tensor = torch.tensor([generated], device=device)
         embedded = self.embedding(input_tensor)
         output, hidden = self.rnn(embedded, hidden)
 
+        # autoregressive generation
         while len(generated) < self.max_length:
-            last_hidden = output[:, -1:, :]
-            logits = self.linear(last_hidden)
-            logits = logits.squeeze(1) / temp
-            probs = torch.softmax(logits, dim=-1)
+            last_output = output[:, -1:, :]               # (1, 1, H)
+            logits = self.linear(last_output).squeeze(1)  # (1, V)
+            probs = torch.softmax(logits / temp, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).item()
 
             generated.append(next_token)
-
             if next_token == self.dataset.eos_id:
                 break
 
+            # подаём токен дальше без пересчёта всей последовательности
             next_input = torch.tensor([[next_token]], device=device)
             next_embedded = self.embedding(next_input)
             output, hidden = self.rnn(next_embedded, hidden)
 
-        result_ids = generated
-        if result_ids and result_ids[0] == self.dataset.bos_id:
-            result_ids = result_ids[1:]
-        if self.dataset.eos_id in result_ids:
-            result_ids = result_ids[:result_ids.index(self.dataset.eos_id)]
+        # убираем BOS и всё после EOS
+        gen_ids = generated
+        if gen_ids and gen_ids[0] == self.dataset.bos_id:
+            gen_ids = gen_ids[1:]
+        if self.dataset.eos_id in gen_ids:
+            gen_ids = gen_ids[:gen_ids.index(self.dataset.eos_id)]
 
-        return self.dataset.ids2text(result_ids)
+        text = self.dataset.ids2text(gen_ids)
+        # гарантируем, что возвращённая строка начинается с prefix
+        if not text.startswith(prefix):
+            text = prefix + text
+        return text
