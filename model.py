@@ -27,6 +27,9 @@ class LanguageModel(nn.Module):
         self.linear = nn.Linear(in_features=hidden_size, out_features=self.vocab_size)
 
     def forward(self, indices: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        # КРИТИЧЕСКИ ВАЖНО: обрезаем индексы до валидного диапазона
+        indices = torch.clamp(indices, min=0, max=self.vocab_size - 1)
+        
         max_len = int(lengths.max().item())
         x = self.embedding(indices[:, :max_len])
         output, _ = self.rnn(x)
