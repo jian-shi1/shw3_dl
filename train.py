@@ -1,4 +1,5 @@
 import torch
+import numpy as np  # Добавлен импорт для перплексии
 import seaborn as sns
 import matplotlib.pyplot as plt
 from typing import List, Optional, Any
@@ -7,7 +8,7 @@ from torch.utils.data import DataLoader
 from IPython.display import clear_output
 from tqdm.notebook import tqdm
 from model import LanguageModel
-import numpy as np
+
 
 sns.set_style('whitegrid')
 plt.rcParams.update({'font.size': 15})
@@ -24,21 +25,18 @@ def plot_losses(train_losses: List[float], val_losses: List[float]):
     axs[0].plot(range(1, len(train_losses) + 1), train_losses, label='train')
     axs[0].plot(range(1, len(val_losses) + 1), val_losses, label='val')
     axs[0].set_ylabel('loss')
+    axs[0].set_xlabel('epoch')
+    axs[0].legend()
 
-    """
-    YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-    Calculate train and validation perplexities given lists of losses
-    """
-    train_perplexities = [np.exp(l) for l in train_losses]
-    val_perplexities = [np.exp(l) for l in val_losses]
+    # Перплексия = exp(loss) для каждого значения лосса
+    train_perplexities = [np.exp(loss) for loss in train_losses]
+    val_perplexities = [np.exp(loss) for loss in val_losses]
 
     axs[1].plot(range(1, len(train_perplexities) + 1), train_perplexities, label='train')
     axs[1].plot(range(1, len(val_perplexities) + 1), val_perplexities, label='val')
     axs[1].set_ylabel('perplexity')
-
-    for ax in axs:
-        ax.set_xlabel('epoch')
-        ax.legend()
+    axs[1].set_xlabel('epoch')
+    axs[1].legend()
 
     plt.show()
 
@@ -56,40 +54,38 @@ def training_epoch(model: LanguageModel, optimizer: torch.optim.Optimizer, crite
     """
     device = next(model.parameters()).device
     train_loss = 0.0
-    total_tokens = 0
+    total_samples = 0
 
     model.train()
     for indices, lengths in tqdm(loader, desc=tqdm_desc):
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Process one training step: calculate loss,
-        call backward and make one optimizer step.
-        Accumulate sum of losses for different batches in train_loss
-        """
         indices = indices.to(device)
         lengths = lengths.to(device)
-
-        # Forward pass
-        logits = model(indices, lengths)                     # (batch, L, vocab_size)
-        L = lengths.max().item()
-        # Shift logits and targets: predict next token
-        logits = logits[:, :-1, :]                            # (batch, L-1, vocab_size)
-        targets = indices[:, 1:L]                             # (batch, L-1)
-
-        loss = criterion(logits.reshape(-1, model.vocab_size), targets.reshape(-1))
-
-        # Accumulate loss weighted by number of valid tokens in batch
-        tokens_in_batch = (lengths - 1).sum().item()
-        train_loss += loss.item() * tokens_in_batch
-        total_tokens += tokens_in_batch
-
+        
+        # Получаем логиты для ВСЕЙ последовательности (длина L)
+        logits = model(indices, lengths)  # (B, L, V), где L = lengths.max()
+        L = logits.size(1)
+        
+        # Цели: сдвигаем исходные индексы на 1 влево (предсказываем следующий токен)
+        targets = indices[:, 1:L+1] if L < indices.size(1) else indices[:, 1:]  # (B, L)
+        # Обрезаем targets до длины логитов (на случай, если L = max_length)
+        targets = targets[:, :L]
+        
+        # Подготавливаем для CrossEntropyLoss
+        logits_flat = logits.reshape(-1, logits.size(-1))  # (B*L, V)
+        targets_flat = targets.reshape(-1)                  # (B*L,)
+        
+        loss = criterion(logits_flat, targets_flat)
+        
+        # Шаг оптимизации
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        
+        # Накапливаем лосс * количество последовательностей в батче
+        train_loss += loss.item() * indices.size(0)
+        total_samples += indices.size(0)
 
-    train_loss = train_loss / total_tokens * len(loader.dataset)
-    train_loss /= len(loader.dataset)
-    return train_loss
+    return train_loss / total_samples
 
 
 @torch.no_grad()
@@ -105,31 +101,29 @@ def validation_epoch(model: LanguageModel, criterion: nn.Module,
     """
     device = next(model.parameters()).device
     val_loss = 0.0
-    total_tokens = 0
+    total_samples = 0
 
     model.eval()
     for indices, lengths in tqdm(loader, desc=tqdm_desc):
         indices = indices.to(device)
         lengths = lengths.to(device)
+        
+        logits = model(indices, lengths)  # (B, L, V)
+        L = logits.size(1)
+        
+        targets = indices[:, 1:L+1] if L < indices.size(1) else indices[:, 1:]
+        targets = targets[:, :L]
+        
+        logits_flat = logits.reshape(-1, logits.size(-1))
+        targets_flat = targets.reshape(-1)
+        
+        loss = criterion(logits_flat, targets_flat)
+        
+        val_loss += loss.item() * indices.size(0)
+        total_samples += indices.size(0)
 
-        logits = model(indices, lengths)
-        L = lengths.max().item()
-        logits = logits[:, :-1, :]
-        targets = indices[:, 1:L]
+    return val_loss / total_samples
 
-        loss = criterion(logits.reshape(-1, model.vocab_size), targets.reshape(-1))
-
-        tokens_in_batch = (lengths - 1).sum().item()
-        val_loss += loss.item() * tokens_in_batch
-        total_tokens += tokens_in_batch
-
-    # Same trick as in training_epoch
-    val_loss = val_loss / total_tokens * len(loader.dataset)
-    val_loss /= len(loader.dataset)
-    return val_loss
-
-
-# В файле train.py измените функцию train:
 
 def train(model: LanguageModel, optimizer: torch.optim.Optimizer, scheduler: Optional[Any],
           train_loader: DataLoader, val_loader: DataLoader, num_epochs: int, num_examples=5):
@@ -145,6 +139,8 @@ def train(model: LanguageModel, optimizer: torch.optim.Optimizer, scheduler: Opt
     """
     train_losses, val_losses = [], []
     criterion = nn.CrossEntropyLoss(ignore_index=train_loader.dataset.pad_id)
+    device = next(model.parameters()).device
+    model.to(device)
 
     for epoch in range(1, num_epochs + 1):
         train_loss = training_epoch(
@@ -157,12 +153,25 @@ def train(model: LanguageModel, optimizer: torch.optim.Optimizer, scheduler: Opt
         )
 
         if scheduler is not None:
-            scheduler.step(val_loss)  # <- передаем метрику
+            scheduler.step()
 
-        train_losses += [train_loss]
-        val_losses += [val_loss]
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
         plot_losses(train_losses, val_losses)
 
         print('Generation examples:')
         for _ in range(num_examples):
             print(model.inference())
+        
+        # Сохраняем чекпоинт после каждой эпохи
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+        }, f'rnn_model_epoch_{epoch}.pt')
+    
+    # Сохраняем финальную модель
+    torch.save(model.state_dict(), 'rnn_model_final.pt')
+    print("Модель сохранена как 'rnn_model_final.pt'")
