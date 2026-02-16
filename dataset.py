@@ -1,3 +1,4 @@
+import numpy as np
 import os
 import torch
 from typing import Union, List, Tuple
@@ -34,13 +35,14 @@ class TextDataset(Dataset):
 
         with open(data_file) as file:
             texts = file.readlines()
-
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Split texts to train and validation fixing self.TRAIN_VAL_RANDOM_SEED
-        The validation ratio is self.VAL_RATIO
-        """
-        train_texts, val_texts = None, None
+        
+        np.random.seed(self.TRAIN_VAL_RANDOM_SEED)
+        perm = np.random.permutation(len(texts))
+        n_val = int(len(texts) * self.VAL_RATIO)
+        val_idx = perm[:n_val]
+        train_idx = perm[n_val:]
+        train_texts = [texts[i] for i in train_idx]
+        val_texts = [texts[i] for i in val_idx]
         self.texts = train_texts if train else val_texts
         self.indices = self.sp_model.encode(self.texts)
 
@@ -83,14 +85,19 @@ class TextDataset(Dataset):
         :param item: text id
         :return: encoded text indices and its actual length (including BOS and EOS specials)
         """
-        # These are placeholders, you may remove them.
-        indices = torch.randint(high=self.vocab_size, size=(self.max_length, ))
-        length = torch.randint(low=1, high=self.max_length + 1, size=()).item()
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Take corresponding index array from self.indices,
-        add special tokens (self.bos_id and self.eos_id) and 
-        pad to self.max_length using self.pad_id.
-        Return padded indices of size (max_length, ) and its actual length
-        """
-        return indices, length
+
+        orig_indices = self.indices[item]  # Список индексов исходного текста без спецсимволов
+
+        # Обрезаем до max_length-2, чтобы оставить место для BOS и EOS
+        if len(orig_indices) > self.max_length - 2:
+            orig_indices = orig_indices[:self.max_length - 2]
+
+        # Формируем последовательность: [BOS] + токены + [EOS]
+        seq = [self.bos_id] + orig_indices + [self.eos_id]
+        seq_len = len(seq)
+
+        # Создаём тензор, заполненный PAD, и копируем последовательность в начало
+        indices_tensor = torch.full((self.max_length,), self.pad_id, dtype=torch.long)
+        indices_tensor[:seq_len] = torch.tensor(seq, dtype=torch.long)
+
+        return indices_tensor, seq_len
