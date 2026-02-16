@@ -41,32 +41,24 @@ class LanguageModel(nn.Module):
         Convert indices to embeddings, pass them through recurrent layers
         and apply output linear layer to obtain the logits
         """
-        # Получаем максимальную длину в батче
-        max_len = lengths.max().item()
-        
-        # Обрезаем входные индексы до максимальной длины
-        indices = indices[:, :max_len]
-        
-        # Получаем эмбеддинги
-        embeddings = self.embedding(indices)  # (batch_size, max_len, embed_size)
-        
-        # Создаем PackedSequence для эффективной обработки переменных длин
-        packed_embeddings = nn.utils.rnn.pack_padded_sequence(
-            embeddings, lengths.cpu(), batch_first=True, enforce_sorted=False
+
+        # Эмбеддинг
+        x = self.embedding(indices)  # (B, L, E)
+
+        # Упаковка, чтобы RNN не считал паддинги
+        packed = nn.utils.rnn.pack_padded_sequence(
+            x, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
-        
-        # Пропускаем через RNN
-        packed_output, _ = self.rnn(packed_embeddings)
-        
-        # Распаковываем обратно
-        rnn_out, _ = nn.utils.rnn.pad_packed_sequence(
-            packed_output, batch_first=True, total_length=max_len
-        )  # (batch_size, max_len, hidden_size)
-        
-        # Применяем линейный слой для получения логитов
-        logits = self.linear(rnn_out)  # (batch_size, max_len, vocab_size)
-        
-        return logits
+
+        outputs, _ = self.rnn(packed)
+
+        out, _ = nn.utils.rnn.pad_packed_sequence(
+            outputs, batch_first=True, total_length=None
+        )
+        # out: (B, max(lengths), hidden_size)
+
+        logits = self.linear(out)
+        return logits  # (B, max(lengths), vocab_size)
 
     @torch.inference_mode()
     def inference(self, prefix: str = '', temp: float = 1.) -> str:
