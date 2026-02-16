@@ -42,15 +42,14 @@ class LanguageModel(nn.Module):
         :param lengths: LongTensor of lengths of size (batch_size, )
         :return: FloatTensor of logits of shape (batch_size, output length, vocab_size)
         """
-        device = indices.device
-        max_len_in_batch = lengths.max().item()
-        
+        max_len_in_batch = int(lengths.max().item())
+    
         # Обрезаем вход до максимальной длины в батче
         input_seq = indices[:, :max_len_in_batch]  # (B, L_actual)
         
-        embedded = self.embedding(input_seq)  # (B, L_actual, E)
-        output, _ = self.rnn(embedded)        # (B, L_actual, H)
-        logits = self.linear(output)          # (B, L_actual, V)
+        embedded = self.embedding(input_seq)       # (B, L_actual, E)
+        output, _ = self.rnn(embedded)             # (B, L_actual, H)
+        logits = self.linear(output)               # (B, L_actual, V)
         
         return logits
 
