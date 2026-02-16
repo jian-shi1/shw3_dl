@@ -7,133 +7,80 @@ from dataset import TextDataset
 class LanguageModel(nn.Module):
     def __init__(self, dataset: TextDataset, embed_size: int = 256, hidden_size: int = 256,
                  rnn_type: Type = nn.RNN, rnn_layers: int = 1):
-        """
-        Model for text generation
-        :param dataset: text data dataset (to extract vocab_size and max_length)
-        :param embed_size: dimensionality of embeddings
-        :param hidden_size: dimensionality of hidden state
-        :param rnn_type: type of RNN layer (nn.RNN or nn.LSTM)
-        :param rnn_layers: number of layers in RNN
-        """
         super(LanguageModel, self).__init__()
-        self.dataset = dataset  # required for decoding during inference
+        self.dataset = dataset
         self.vocab_size = dataset.vocab_size
         self.max_length = dataset.max_length
 
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Create necessary layers
-        """
-        self.embedding = nn.Embedding(self.vocab_size, embed_size, padding_idx=dataset.pad_id)
-        self.rnn = rnn_type(embed_size, hidden_size, rnn_layers, batch_first=True)
-        self.linear = nn.Linear(hidden_size, self.vocab_size)
+        # Создаём слои
+        self.embedding = nn.Embedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=embed_size,
+            padding_idx=dataset.pad_id
+        )
+        self.rnn = rnn_type(
+            input_size=embed_size,
+            hidden_size=hidden_size,
+            num_layers=rnn_layers,
+            batch_first=True
+        )
+        self.linear = nn.Linear(in_features=hidden_size, out_features=self.vocab_size)
 
     def forward(self, indices: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        """
-        Compute forward pass through the model and
-        return logits for the next token probabilities
-        :param indices: LongTensor of encoded tokens of size (batch_size, max_length)
-        :param lengths: LongTensor of lengths of size (batch_size, )
-        :return: FloatTensor of logits of shape (batch_size, lengths.max(), vocab_size)
-        """
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Convert indices to embeddings, pass them through recurrent layers
-        and apply output linear layer to obtain the logits
-        """
-
-        # Эмбеддинг
-        x = self.embedding(indices)  # (B, L, E)
-
-        # Упаковка, чтобы RNN не считал паддинги
-        packed = nn.utils.rnn.pack_padded_sequence(
-            x, lengths.cpu(), batch_first=True, enforce_sorted=False
-        )
-
-        outputs, _ = self.rnn(packed)
-
-        out, _ = nn.utils.rnn.pad_packed_sequence(
-            outputs, batch_first=True, total_length=None
-        )
-        # out: (B, max(lengths), hidden_size)
-
-        logits = self.linear(out)
-        return logits  # (B, max(lengths), vocab_size)
+        # ЕДИНСТВЕННОЕ ПРАВИЛЬНОЕ ВЫЧИСЛЕНИЕ L
+        L = int(lengths.max())  # <-- РАБОТАЕТ И ДЛЯ CPU, И ДЛЯ GPU В ПОСЛЕДНИХ ВЕРСИЯХ PYTORCH
+        # ИЛИ БЕЗОПАСНЫЙ ВАРИАНТ: L = lengths.max().item()
+        
+        x = self.embedding(indices[:, :L])  # Обрезаем ДО подачи в RNN
+        output, _ = self.rnn(x)
+        return self.linear(output)  # Форма: (batch_size, L, vocab_size)
 
     @torch.inference_mode()
     def inference(self, prefix: str = '', temp: float = 1.) -> str:
-        """
-        Generate new text with an optional prefix
-        :param prefix: prefix to start generation
-        :param temp: sampling temperature
-        :return: generated text
-        """
         self.eval()
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Encode the prefix (do not forget the BOS token!),
-        pass it through the model to accumulate RNN hidden state and
-        generate new tokens sequentially, sampling from categorical distribution,
-        until EOS token or reaching self.max_length.
-        Do not forget to divide predicted logits by temperature before sampling
-        """
         device = next(self.parameters()).device
-        
-        # Кодируем префикс
-        if prefix:
-            prefix_ids = self.dataset.text2ids(prefix)
-            # Добавляем BOS в начало
-            input_ids = [self.dataset.bos_id] + prefix_ids
+
+        # 1. Кодируем префикс → добавляем BOS вручную
+        prefix_ids = self.dataset.text2ids(prefix) if prefix else []
+        seq = [self.dataset.bos_id] + prefix_ids
+
+        # 2. Защита от переполнения
+        if len(seq) >= self.max_length:
+            res = seq[1:self.max_length]  # убрали BOS, обрезали до лимита
+            if self.dataset.eos_id in res:
+                res = res[:res.index(self.dataset.eos_id)]
+            return self.dataset.ids2text(res)
+
+        # 3. Инициализация скрытого состояния
+        batch_size = 1
+        if isinstance(self.rnn, nn.LSTM):
+            h = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
+            c = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
+            hidden = (h, c)
         else:
-            # Если префикс пустой, начинаем только с BOS
-            input_ids = [self.dataset.bos_id]
-        
-        # Инициализируем скрытое состояние
-        hidden = None
-        
-        # Прогоняем префикс через модель для накопления скрытого состояния
-        for token_id in input_ids:
-            token_tensor = torch.tensor([[token_id]], dtype=torch.long, device=device)
-            embedding = self.embedding(token_tensor)  # (1, 1, embed_size)
-            
-            if isinstance(self.rnn, nn.LSTM):
-                rnn_out, hidden = self.rnn(embedding, hidden)
-            else:
-                rnn_out, hidden = self.rnn(embedding, hidden)
-        
-        # Генерируем новые токены
-        generated_ids = input_ids.copy()
-        
-        while len(generated_ids) < self.max_length:
-            # Получаем логиты для следующего токена
-            logits = self.linear(rnn_out)  # (1, 1, vocab_size)
-            logits = logits.squeeze() / temp  # (vocab_size,)
-            
-            # Семплируем следующий токен
+            hidden = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
+
+        # 4. Прогоняем префикс через модель
+        input_tensor = torch.tensor([seq], device=device)  # (1, T)
+        embedded = self.embedding(input_tensor)
+        _, hidden = self.rnn(embedded, hidden)  # Нам нужно ТОЛЬКО скрытое состояние
+
+        # 5. Генерация по одному токену
+        generated = seq.copy()
+        while len(generated) < self.max_length:
+            # Текущий токен для генерации — последний в последовательности
+            last_token = torch.tensor([[generated[-1]]], device=device)  # (1, 1)
+            emb = self.embedding(last_token)  # (1, 1, E)
+            output, hidden = self.rnn(emb, hidden)  # (1, 1, H)
+            logits = self.linear(output.squeeze(1)) / temp  # (1, V)
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).item()
-            
-            # Проверяем на EOS
+            generated.append(next_token)
             if next_token == self.dataset.eos_id:
                 break
-            
-            generated_ids.append(next_token)
-            
-            # Обновляем скрытое состояние для следующего шага
-            token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=device)
-            embedding = self.embedding(token_tensor)
-            
-            if isinstance(self.rnn, nn.LSTM):
-                rnn_out, hidden = self.rnn(embedding, hidden)
-            else:
-                rnn_out, hidden = self.rnn(embedding, hidden)
-        
-        # Декодируем в текст (убираем BOS из начала)
-        if prefix:
-            # Возвращаем префикс + сгенерированное
-            generated_text = self.dataset.ids2text(generated_ids[1:])
-        else:
-            # Если префикса не было, возвращаем все кроме BOS
-            generated_text = self.dataset.ids2text(generated_ids[1:])
-        
-        return generated_text
+
+        # 6. Постобработка: убрать BOS, обрезать до EOS
+        result_ids = generated[1:]  # убрали BOS
+        if self.dataset.eos_id in result_ids:
+            result_ids = result_ids[:result_ids.index(self.dataset.eos_id)]
+        return self.dataset.ids2text(result_ids)
