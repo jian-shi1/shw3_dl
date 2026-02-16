@@ -42,15 +42,20 @@ class LanguageModel(nn.Module):
         :param lengths: LongTensor of lengths of size (batch_size, )
         :return: FloatTensor of logits of shape (batch_size, output length, vocab_size)
         """
+        # Определяем реальную максимальную длину в батче
         max_len_in_batch = int(lengths.max().item())
-    
-        # Обрезаем вход до максимальной длины в батче
-        input_seq = indices[:, :max_len_in_batch]  # (B, L_actual)
-        
-        embedded = self.embedding(input_seq)       # (B, L_actual, E)
-        output, _ = self.rnn(embedded)             # (B, L_actual, H)
-        logits = self.linear(output)               # (B, L_actual, V)
-        
+        # Обрезаем вход до этой длины (убираем лишние паддинги справа)
+        input_seq = indices[:, :max_len_in_batch] # (B, L_actual)
+        embedded = self.embedding(input_seq) # (B, L_actual, E)
+
+        # Упаковываем последовательность, чтобы RNN игнорировала паддинги
+        packed_embedded = nn.utils.rnn.pack_padded_sequence(
+            embedded, lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        packed_output, _ = self.rnn(packed_embedded)
+        output, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)  # (B, L_actual, H)
+
+        logits = self.linear(output) # (B, L_actual, V)
         return logits
 
     @torch.inference_mode()
