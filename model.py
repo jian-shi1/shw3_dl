@@ -27,13 +27,10 @@ class LanguageModel(nn.Module):
         self.linear = nn.Linear(in_features=hidden_size, out_features=self.vocab_size)
 
     def forward(self, indices: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        # ЕДИНСТВЕННОЕ ПРАВИЛЬНОЕ ВЫЧИСЛЕНИЕ L
-        L = int(lengths.max())  # <-- РАБОТАЕТ И ДЛЯ CPU, И ДЛЯ GPU В ПОСЛЕДНИХ ВЕРСИЯХ PYTORCH
-        # ИЛИ БЕЗОПАСНЫЙ ВАРИАНТ: L = lengths.max().item()
-        
-        x = self.embedding(indices[:, :L])  # Обрезаем ДО подачи в RNN
+        max_len = int(lengths.max().item())
+        x = self.embedding(indices[:, :max_len])
         output, _ = self.rnn(x)
-        return self.linear(output)  # Форма: (batch_size, L, vocab_size)
+        return self.linear(output)
 
     @torch.inference_mode()
     def inference(self, prefix: str = '', temp: float = 1.) -> str:
