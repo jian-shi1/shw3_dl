@@ -42,33 +42,15 @@ class LanguageModel(nn.Module):
         :param lengths: LongTensor of lengths of size (batch_size, )
         :return: FloatTensor of logits of shape (batch_size, output length, vocab_size)
         """
-        # Эмбеддинг последовательности
-        embedded = self.embedding(indices)  # (batch_size, seq_len, embed_size)
-        
-        # Сортировка для корректной упаковки
-        lengths = lengths.cpu()
-        sorted_lengths, sorted_idx = torch.sort(lengths, descending=True)
-        embedded_sorted = embedded[sorted_idx]
-        
-        # Упаковка, проход через RNN, распаковка
-        packed = nn.utils.rnn.pack_padded_sequence(
-            embedded_sorted, sorted_lengths, batch_first=True, enforce_sorted=True
-        )
-        output_packed, _ = self.rnn(packed)
-        output, _ = nn.utils.rnn.pad_packed_sequence(
-            output_packed, batch_first=True, total_length=indices.size(1)
-        )
-        
-        # Восстановление исходного порядка
-        _, original_idx = torch.sort(sorted_idx)
-        output = output[original_idx]
-        
-        # Линейный слой -> логиты
-        logits = self.linear(output)  # (batch_size, seq_len, vocab_size)
-        
-        # Обрезка до максимальной длины в батче (требуется тестами)
+        device = indices.device
         max_len_in_batch = lengths.max().item()
-        logits = logits[:, :max_len_in_batch, :]
+        
+        # Обрезаем вход до максимальной длины в батче
+        input_seq = indices[:, :max_len_in_batch]  # (B, L_actual)
+        
+        embedded = self.embedding(input_seq)  # (B, L_actual, E)
+        output, _ = self.rnn(embedded)        # (B, L_actual, H)
+        logits = self.linear(output)          # (B, L_actual, V)
         
         return logits
 
@@ -85,7 +67,7 @@ class LanguageModel(nn.Module):
         
         # Кодирование префикса (без спецсимволов)
         prefix_ids = self.dataset.text2ids(prefix) if prefix else []
-        generated_ids = [self.dataset.bos_id] + prefix_ids
+        generated = [self.dataset.bos_id] + prefix_ids
         
         # Защита от переполнения длины
         if len(generated_ids) >= self.max_length:
@@ -97,10 +79,6 @@ class LanguageModel(nn.Module):
                 generated_ids = generated_ids[:generated_ids.index(self.dataset.eos_id)]
             return self.dataset.ids2text(generated_ids)
         
-        # Обработка префикса через модель для получения скрытого состояния
-        input_tensor = torch.tensor([generated_ids], device=device)
-        embedded = self.embedding(input_tensor)
-        
         # Инициализация скрытого состояния
         batch_size = 1
         if isinstance(self.rnn, nn.LSTM):
@@ -110,33 +88,33 @@ class LanguageModel(nn.Module):
         else:
             hidden = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size, device=device)
         
-        output, hidden = self.rnn(embedded, hidden)  # output: (1, seq_len, hidden_size)
+        input_tensor = torch.tensor([generated], device=device)  # (1, T)
+        embedded = self.embedding(input_tensor)  # (1, T, E)
+        output, hidden = self.rnn(embedded, hidden)  # output: (1, T, H)
         
-        # Генерация токенов
-        current_length = len(generated_ids)
-        while current_length < self.max_length:
-            # Получаем логиты для следующего токена (последний шаг выхода RNN)
-            logits = self.linear(output[:, -1, :])  # (1, vocab_size)
-            logits = logits / temp
+        # Генерация по одному токену
+        while len(generated) < self.max_length:
+            last_hidden = output[:, -1:, :]  # (1, 1, H)
+            logits = self.linear(last_hidden)  # (1, 1, V)
+            logits = logits.squeeze(1) / temp  # (1, V)
             probs = torch.softmax(logits, dim=-1)
-            next_token_id = torch.multinomial(probs, num_samples=1).item()
+            next_token = torch.multinomial(probs, num_samples=1).item()
             
-            generated_ids.append(next_token_id)
-            current_length += 1
+            generated.append(next_token)
             
-            # Прерывание при генерации EOS или достижении лимита
-            if next_token_id == self.dataset.eos_id or current_length >= self.max_length:
+            if next_token == self.dataset.eos_id:
                 break
             
-            # Подготовка следующего шага: подаём сгенерированный токен в RNN
-            next_input = torch.tensor([[next_token_id]], device=device)
-            next_embedded = self.embedding(next_input)
-            output, hidden = self.rnn(next_embedded, hidden)  # output: (1, 1, hidden_size)
+            # Подготовка следующего шага
+            next_input = torch.tensor([[next_token]], device=device)  # (1, 1)
+            next_embedded = self.embedding(next_input)  # (1, 1, E)
+            output, hidden = self.rnn(next_embedded, hidden)  # (1, 1, H)
         
-        # Постобработка: удаление BOS, обрезка до EOS
-        if generated_ids and generated_ids[0] == self.dataset.bos_id:
-            generated_ids = generated_ids[1:]
-        if self.dataset.eos_id in generated_ids:
-            generated_ids = generated_ids[:generated_ids.index(self.dataset.eos_id)]
+        # Постобработка: убрать BOS, обрезать до EOS
+        result_ids = generated
+        if result_ids and result_ids[0] == self.dataset.bos_id:
+            result_ids = result_ids[1:]
+        if self.dataset.eos_id in result_ids:
+            result_ids = result_ids[:result_ids.index(self.dataset.eos_id)]
         
-        return self.dataset.ids2text(generated_ids)
+        return self.dataset.ids2text(result_ids)
