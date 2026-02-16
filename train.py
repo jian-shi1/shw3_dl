@@ -129,6 +129,8 @@ def validation_epoch(model: LanguageModel, criterion: nn.Module,
     return val_loss
 
 
+# В файле train.py измените функцию train:
+
 def train(model: LanguageModel, optimizer: torch.optim.Optimizer, scheduler: Optional[Any],
           train_loader: DataLoader, val_loader: DataLoader, num_epochs: int, num_examples=5):
     """
@@ -155,7 +157,7 @@ def train(model: LanguageModel, optimizer: torch.optim.Optimizer, scheduler: Opt
         )
 
         if scheduler is not None:
-            scheduler.step()
+            scheduler.step(val_loss)  # <- передаем метрику
 
         train_losses += [train_loss]
         val_losses += [val_loss]
