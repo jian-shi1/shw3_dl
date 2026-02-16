@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from IPython.display import clear_output
 from tqdm.notebook import tqdm
 from model import LanguageModel
-
+import numpy as np
 
 sns.set_style('whitegrid')
 plt.rcParams.update({'font.size': 15})
@@ -29,7 +29,8 @@ def plot_losses(train_losses: List[float], val_losses: List[float]):
     YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
     Calculate train and validation perplexities given lists of losses
     """
-    train_perplexities, val_perplexities = [], []
+    train_perplexities = [np.exp(l) for l in train_losses]
+    val_perplexities = [np.exp(l) for l in val_losses]
 
     axs[1].plot(range(1, len(train_perplexities) + 1), train_perplexities, label='train')
     axs[1].plot(range(1, len(val_perplexities) + 1), val_perplexities, label='val')
@@ -55,6 +56,7 @@ def training_epoch(model: LanguageModel, optimizer: torch.optim.Optimizer, crite
     """
     device = next(model.parameters()).device
     train_loss = 0.0
+    total_tokens = 0
 
     model.train()
     for indices, lengths in tqdm(loader, desc=tqdm_desc):
@@ -64,7 +66,28 @@ def training_epoch(model: LanguageModel, optimizer: torch.optim.Optimizer, crite
         call backward and make one optimizer step.
         Accumulate sum of losses for different batches in train_loss
         """
+        indices = indices.to(device)
+        lengths = lengths.to(device)
 
+        # Forward pass
+        logits = model(indices, lengths)                     # (batch, L, vocab_size)
+        L = lengths.max().item()
+        # Shift logits and targets: predict next token
+        logits = logits[:, :-1, :]                            # (batch, L-1, vocab_size)
+        targets = indices[:, 1:L]                             # (batch, L-1)
+
+        loss = criterion(logits.reshape(-1, model.vocab_size), targets.reshape(-1))
+
+        # Accumulate loss weighted by number of valid tokens in batch
+        tokens_in_batch = (lengths - 1).sum().item()
+        train_loss += loss.item() * tokens_in_batch
+        total_tokens += tokens_in_batch
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    train_loss = train_loss / total_tokens * len(loader.dataset)
     train_loss /= len(loader.dataset)
     return train_loss
 
@@ -82,15 +105,26 @@ def validation_epoch(model: LanguageModel, criterion: nn.Module,
     """
     device = next(model.parameters()).device
     val_loss = 0.0
+    total_tokens = 0
 
     model.eval()
     for indices, lengths in tqdm(loader, desc=tqdm_desc):
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Process one validation step: calculate loss.
-        Accumulate sum of losses for different batches in val_loss
-        """
+        indices = indices.to(device)
+        lengths = lengths.to(device)
 
+        logits = model(indices, lengths)
+        L = lengths.max().item()
+        logits = logits[:, :-1, :]
+        targets = indices[:, 1:L]
+
+        loss = criterion(logits.reshape(-1, model.vocab_size), targets.reshape(-1))
+
+        tokens_in_batch = (lengths - 1).sum().item()
+        val_loss += loss.item() * tokens_in_batch
+        total_tokens += tokens_in_batch
+
+    # Same trick as in training_epoch
+    val_loss = val_loss / total_tokens * len(loader.dataset)
     val_loss /= len(loader.dataset)
     return val_loss
 
