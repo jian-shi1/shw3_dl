@@ -69,14 +69,14 @@ class LanguageModel(nn.Module):
         generated = [self.dataset.bos_id] + prefix_ids
         
         # Защита от переполнения длины
-        if len(generated_ids) >= self.max_length:
-            generated_ids = generated_ids[:self.max_length]
+        if len(generated) >= self.max_length:
+            generated = generated[:self.max_length]
             # Очистка от спецсимволов перед декодированием
-            if generated_ids and generated_ids[0] == self.dataset.bos_id:
-                generated_ids = generated_ids[1:]
-            if self.dataset.eos_id in generated_ids:
-                generated_ids = generated_ids[:generated_ids.index(self.dataset.eos_id)]
-            return self.dataset.ids2text(generated_ids)
+            if generated and generated[0] == self.dataset.bos_id:
+                generated = generated[1:]
+            if self.dataset.eos_id in generated:
+                generated = generated[:generated.index(self.dataset.eos_id)]
+            return self.dataset.ids2text(generated)
         
         # Инициализация скрытого состояния
         batch_size = 1
